@@ -6,7 +6,30 @@
 #include "ofFileUtils.h"
 #include "ofGLProgrammableRenderer.h"
 #include "ofGLRenderer.h"
+#include "ofVectorMath.h"
 #include <assert.h>
+// x11
+#include <X11/Xutil.h>
+#include <EGL/egl.h>
+
+// include includes for both native and X11 possibilities
+#include <libudev.h>
+#include <stdbool.h>
+#include <stdio.h> // sprintf
+#include <stdlib.h>  // malloc
+#include <math.h>
+#include <fcntl.h>  // open fcntl
+#include <unistd.h> // read close
+#include <linux/joystick.h>
+
+#include "linux/kd.h"	// keyboard stuff...
+#include "termios.h"
+#include "sys/ioctl.h"
+
+#include <dirent.h>  // scandir
+#include <string.h> // strlen
+
+using namespace std;
 
 // native events
 struct udev* udev;
@@ -206,7 +229,7 @@ static const char* eglErrorString(EGLint err) {
 
 
 //-------------------------------------------------------------------------------------
-ofAppEGLWindow::Settings::Settings()
+ofAppEGLWindowSettings::ofAppEGLWindowSettings()
 :ofGLESWindowSettings(){
 	eglWindowPreference = OF_APP_WINDOW_AUTO;
 	eglWindowOpacity = 255;
@@ -227,7 +250,7 @@ ofAppEGLWindow::Settings::Settings()
 	layer = 0;
 }
 
-ofAppEGLWindow::Settings::Settings(const ofGLESWindowSettings & settings)
+ofAppEGLWindowSettings::ofAppEGLWindowSettings(const ofGLESWindowSettings & settings)
 :ofGLESWindowSettings(settings){
 	eglWindowPreference = OF_APP_WINDOW_AUTO;
 	eglWindowOpacity = 255;
@@ -276,6 +299,7 @@ ofAppEGLWindow::ofAppEGLWindow() {
 
 //------------------------------------------------------------
 ofAppEGLWindow::~ofAppEGLWindow() {
+	close();
 }
 
 //------------------------------------------------------------
@@ -382,7 +406,7 @@ void ofAppEGLWindow::setup(const ofGLESWindowSettings & settings){
 }
 
 //------------------------------------------------------------
-void ofAppEGLWindow::setup(const Settings & _settings) {
+void ofAppEGLWindow::setup(const ofAppEGLWindowSettings & _settings) {
 	settings = _settings;
 	windowMode = OF_WINDOW;
 	bNewScreenMode = true;
@@ -406,7 +430,7 @@ void ofAppEGLWindow::setup(const Settings & _settings) {
 	eglSurface = NULL;
 	eglContext = NULL;
 	eglConfig  = NULL;
-	eglVersionMinor = -1;
+	eglVersionMajor = -1;
 	eglVersionMinor = -1;
 	glesVersion = 1;
 
@@ -451,7 +475,7 @@ void ofAppEGLWindow::setup(const Settings & _settings) {
 	windowMode = settings.windowMode;
 	bShowCursor = true;
 
-	nonFullscreenWindowRect.set(0,0,settings.width,settings.height);
+	nonFullscreenWindowRect.set(0,0,settings.getWidth(),settings.getHeight());
 	nonFullscreenWindowRect.standardize();
 
 	ofRectangle startRect = nonFullscreenWindowRect;
@@ -700,7 +724,7 @@ bool ofAppEGLWindow::createSurface() {
 			eglSurface, // read surface
 			eglContext);
 
-	if(eglContext == EGL_FALSE) {
+	if(eglContext == nullptr) {
 		EGLint error = eglGetError();
 		ofLogError("ofAppEGLWindow") << "createSurface(): couldn't making current surface: " << eglErrorString(error);
 		return false;
@@ -1087,7 +1111,7 @@ glm::vec2 ofAppEGLWindow::getWindowSize(){
 
 //------------------------------------------------------------
 glm::vec2 ofAppEGLWindow::getWindowPosition(){
-	return currentWindowRect.getPosition().xy();
+	return glm::vec2(currentWindowRect.getPosition());
 }
 
 //------------------------------------------------------------
@@ -1349,7 +1373,7 @@ void ofAppEGLWindow::setupNativeMouse() {
 	// fallback to /dev/input/eventX since some vnc servers use uinput to handle mouse & keyboard
 	typedef int (*filter_ptr)(const struct dirent *d);
 	filter_ptr mouse_filters[2] = { filter_mouse, filter_event };
-	string devicePathBuffers[2] = { "/dev/input/by-path", "/dev/input/" };
+	string devicePathBuffers[2] = { "/dev/input/by-path/", "/dev/input/" };
 
 	for(int i=0; i<2; i++){
 		int n = scandir(devicePathBuffers[i].c_str(), &eps, mouse_filters[i], dummy_sort);
@@ -1381,7 +1405,30 @@ void ofAppEGLWindow::setupNativeMouse() {
 		mouseDetected = true;
 	}
 
+	// Detect min and max values for absolute axes. Useful for trackpads and touchscreens.
+	// More info on input_absinfo https://github.com/torvalds/linux/blob/master/include/uapi/linux/input.h
+	if(mouseDetected){
 
+		// Do this for the x axis. EVIOCGABS(0): 0 stands for x axis.
+		struct input_absinfo mabsx;
+		if (ioctl(mouse_fd, EVIOCGABS(0), &mabsx) < 0){
+			ofLogError("ofAppEGLWindow") << "ioctl GABS failed";
+		} else {
+			mouseAbsXMin = mabsx.minimum;
+			mouseAbsXMax = mabsx.maximum;
+			ofLogNotice("ofAppEGLWindow") << "mouse x axis min, max: " << mouseAbsXMin << ", " << mouseAbsXMax;
+		}
+
+		// Do that for the y axis. EVIOCGABS(1): 1 stands for y axis.
+		struct input_absinfo mabsy;
+		if (ioctl(mouse_fd, EVIOCGABS(1), &mabsy) < 0){
+			ofLogError("ofAppEGLWindow") << "ioctl GABS failed";
+		} else {
+			mouseAbsYMin = mabsy.minimum;
+			mouseAbsYMax = mabsy.maximum;
+			ofLogNotice("ofAppEGLWindow") << "mouse y axis min, max: " << mouseAbsYMin << ", " << mouseAbsYMax;
+		}
+	}
 }
 
 //------------------------------------------------------------
@@ -1389,7 +1436,7 @@ void ofAppEGLWindow::setupNativeKeyboard() {
 	struct dirent **eps;
 	typedef int (*filter_ptr)(const struct dirent *d);
 	filter_ptr kbd_filters[2] = { filter_kbd, filter_event };
-	string devicePathBuffers[2] = { "/dev/input/by-path", "/dev/input/" };
+	string devicePathBuffers[2] = { "/dev/input/by-path/", "/dev/input/" };
 
 	for(int i=0; i<2; i++){
 		int n = scandir(devicePathBuffers[i].c_str(), &eps, kbd_filters[i], dummy_sort);
@@ -1702,7 +1749,7 @@ void ofAppEGLWindow::readNativeMouseEvents() {
 				if(ev.type == EV_REL) {
 					mouseEvent.x += amount * mouseScaleX;
 				} else {
-					mouseEvent.x = amount * mouseScaleX;
+					mouseEvent.x = amount * (float)currentWindowRect.width / (float)mouseAbsXMax;
 				}
 
 				mouseEvent.x = ofClamp(mouseEvent.x, 0, currentWindowRect.width);
@@ -1712,7 +1759,7 @@ void ofAppEGLWindow::readNativeMouseEvents() {
 				if(ev.type == EV_REL) {
 					mouseEvent.y += amount * mouseScaleY;
 				} else {
-					mouseEvent.y = amount * mouseScaleY;
+					mouseEvent.y = amount * (float)currentWindowRect.height / (float)mouseAbsYMax;
 				}
 
 				mouseEvent.y = ofClamp(mouseEvent.y, 0, currentWindowRect.height);
