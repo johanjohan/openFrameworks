@@ -134,3 +134,5 @@ Desktop.ini
 .mailmap
 /apps*/
 *.ico
+apps/projectGenerator
+scripts/apothecary
