@@ -136,3 +136,5 @@ Desktop.ini
 *.ico
 apps/projectGenerator
 scripts/apothecary
+examples/computer_vision/opencvHaarFinderExample/.vs/opencvHaarFinderExample/v15/Browse.VC.db
+examples/computer_vision/opencvHaarFinderExample/.vs/opencvHaarFinderExample/v15/Solution.VC.db
